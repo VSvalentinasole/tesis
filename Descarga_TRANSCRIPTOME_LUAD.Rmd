@@ -1,0 +1,92 @@
+---
+title: "Descarga_TRANSCRIPTOME_LUAD"
+output: html_document
+date: "2025-06-24"
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r }
+# Instalar paquetes si no están
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+
+if (!requireNamespace("GenomicDataCommons", quietly = TRUE))
+  BiocManager::install("GenomicDataCommons")
+
+if (!requireNamespace("fs", quietly = TRUE)) install.packages("fs")
+if (!requireNamespace("httr", quietly = TRUE)) install.packages("httr")
+if (!requireNamespace("readr", quietly = TRUE)) install.packages("readr")
+if (!requireNamespace("dplyr", quietly = TRUE)) install.packages("dplyr")
+if (!requireNamespace("purrr", quietly = TRUE)) install.packages("purrr")
+
+
+# Cargar paquetes
+library(GenomicDataCommons)
+library(httr)
+library(fs)
+library(readr)
+library(dplyr)
+library(purrr)
+
+# Ruta de salida
+output_dir <- "~/UA/GDC/TRANSCRIPTOME"
+dir_create(output_dir)
+
+# 1. Consultar archivos RNA-Seq públicos del proyecto TCGA-LUAD
+files_query <- files() %>%
+  GenomicDataCommons::filter(~ cases.project.project_id == "TCGA-LUAD" &
+                                data_category == "Transcriptome Profiling" &
+                                experimental_strategy == "RNA-Seq" &
+                                access == "open") %>%
+  GenomicDataCommons::select(c("file_id", "file_name")) %>%
+  results_all()
+
+# 2. Convertir a data.frame y extraer patient_id desde el nombre del archivo
+files_df <- as.data.frame(files_query)
+
+files_df <- files_df %>%
+  mutate(
+    patient_id = substr(file_name, 1, 12),
+    file_path = file.path(output_dir, patient_id, file_name)
+  )
+
+# 3. Crear carpetas por paciente
+unique_patients <- unique(files_df$patient_id)
+walk(unique_patients, ~ dir_create(file.path(output_dir, .x)))
+
+# 4. Función de descarga con reintentos
+download_file <- function(file_id, filepath, max_tries = 3) {
+  url <- paste0("https://api.gdc.cancer.gov/data/", file_id)
+  tries <- 1
+  repeat {
+    tryCatch({
+      resp <- GET(url, write_disk(filepath, overwrite = TRUE), timeout(120))
+      if (status_code(resp) == 200) {
+        message("✔️ ", basename(filepath))
+        break
+      } else {
+        warning("❌ HTTP ", status_code(resp), " → ", basename(filepath))
+      }
+    }, error = function(e) {
+      message("⚠️ Error intento ", tries, ": ", basename(filepath), " → ", conditionMessage(e))
+    })
+    tries <- tries + 1
+    if (tries > max_tries) {
+      warning("❌ Falló tras ", max_tries, " intentos: ", basename(filepath))
+      break
+    }
+    Sys.sleep(5)
+  }
+}
+
+# 5. Descargar todos los archivos
+for (i in seq_len(nrow(files_df))) {
+  download_file(files_df$file_id[i], files_df$file_path[i])
+}
+
+# 6. Guardar CSV resumen
+write_csv(files_df, file.path(output_dir, "descargas_por_paciente.csv"))
